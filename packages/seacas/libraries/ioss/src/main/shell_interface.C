@@ -203,19 +203,25 @@ void IOShell::Interface::enroll_options()
                   "\t\t(if auto) by `int((max_entry+1)/proc_count)`.",
                   nullptr);
 
+  options_.enroll("line_decomp", Ioss::GetLongOption::OptionalValue,
+                  "Generate the `lines` or `columns` of elements from the specified surface(s).\n"
+                  "\t\tSpecify a comma-separated list of surface/sideset names from which the "
+                  "lines will grow.\n"
+                  "\t\tDo not split a line/column across processors.\n"
+                  "\t\tOmit or enter 'ALL' for all surfaces in model.",
+                  nullptr, "ALL");
+
   options_.enroll("external", Ioss::GetLongOption::NoValue,
                   "Files are decomposed externally into a file-per-processor in a parallel run.",
                   nullptr);
 
-#if defined(SEACAS_HAVE_CGNS)
   options_.enroll(
       "add_processor_id_field", Ioss::GetLongOption::NoValue,
-      "For CGNS, add a cell-centered field whose value is the processor id of that cell", nullptr);
-#endif
-
+      "Add a cell-centered field whose value is the processor id of that cell", nullptr);
+  
   options_.enroll("serialize_io_size", Ioss::GetLongOption::MandatoryValue,
                   "Number of processors that can perform simultaneous IO operations in "
-                  "a parallel run; 0 to disable",
+                  "a parallel run;\n\t\t0 to disable",
                   nullptr, nullptr, true);
 #endif
 
@@ -228,7 +234,7 @@ void IOShell::Interface::enroll_options()
       nullptr);
 
   options_.enroll("split_cyclic", Ioss::GetLongOption::MandatoryValue,
-                  "If non-zero, then the `split_times` timesteps will be put into <$val> files and "
+                  "If non-zero, then the `split_times` timesteps will be put into <$val> files\n\t\tand "
                   "then recycle filenames.",
                   nullptr);
 
@@ -276,7 +282,7 @@ void IOShell::Interface::enroll_options()
 
   options_.enroll("field_suffix_separator", Ioss::GetLongOption::MandatoryValue,
                   "Character used to separate a field suffix from the field basename\n"
-                  "\t\t when recognizing vector, tensor fields. Enter '0' for no separator",
+                  "\t\twhen recognizing vector, tensor fields. Enter '0' for no separator",
                   "_");
 
   options_.enroll("disable_field_recognition", Ioss::GetLongOption::NoValue,
@@ -313,9 +319,8 @@ void IOShell::Interface::enroll_options()
                   nullptr);
 
   options_.enroll("omit_sets", Ioss::GetLongOption::MandatoryValue,
-                  "comma-separated list of nodeset/edgeset/faceset/elemset/sideset names that "
-                  "should NOT be transferred to "
-                  "output database",
+                  "comma-separated list of nodeset/edgeset/faceset/elemset/sideset names\n"
+		  "\t\tthat should NOT be transferred to output database",
                   nullptr);
 
   options_.enroll("boundary_sideset", Ioss::GetLongOption::NoValue,
@@ -510,9 +515,7 @@ bool IOShell::Interface::parse_options(int argc, char **argv, int my_processor)
   }
 
 #if defined(SEACAS_HAVE_MPI)
-#if defined(SEACAS_HAVE_CGNS)
   add_processor_id_field = (options_.retrieve("add_processor_id_field") != nullptr);
-#endif
 
 #if !defined(NO_ZOLTAN_SUPPORT)
   if (options_.retrieve("rcb") != nullptr) {
@@ -554,6 +557,11 @@ bool IOShell::Interface::parse_options(int argc, char **argv, int my_processor)
   if (options_.retrieve("variable") != nullptr) {
     decomp_method = "VARIABLE";
     decomp_extra  = options_.get_option_value("variable", decomp_extra);
+  }
+
+  if (options_.retrieve("line_decomp") != nullptr) {
+    line_decomp = true;
+    decomp_extra = options_.get_option_value("line_decomp", decomp_extra);
   }
 
   if (options_.retrieve("cyclic") != nullptr) {

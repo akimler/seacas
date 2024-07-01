@@ -70,6 +70,9 @@ namespace Iocatalyst {
     inline static const std::string BOUNDARYCONDS      = "boundaryconditions";
     inline static const std::string CATCONDNODE        = "CATALYST_CONDUIT_NODE";
     inline static const std::string CATDUMPDIR         = "CATALYST_DATA_DUMP_DIRECTORY";
+    inline static const std::string CATREADTIMESTEP    = "CATALYST_READER_TIME_STEP";
+    inline static const std::string CELLIDS            = "cell_ids";
+    inline static const std::string CELLNODEIDS        = "cell_node_ids";
     inline static const std::string COMPONENTCOUNT     = "component_count";
     inline static const std::string COMPONENTDEGREE    = "component_degree";
     inline static const std::string COUNT              = "count";
@@ -115,7 +118,6 @@ namespace Iocatalyst {
     inline static const std::string ROLE               = "role";
     inline static const std::string SHALLOWCOPYFIELDS  = "SHALLOW_COPY_FIELDS";
     inline static const std::string SIDEBLOCKS         = "sideblocks";
-    inline static const std::string STATETIME          = "state_time";
     inline static const std::string STORAGE            = "storage";
     inline static const std::string TIME               = "time";
     inline static const std::string TOPOLOGYTYPE       = "topology_type";
@@ -289,6 +291,7 @@ namespace Iocatalyst {
     conduit_cpp::Node                        DBNode;
     mutable Ioss::Map                        NodeMap;
     std::map<std::string, Ioss::SideBlock *> sideBlocks;
+    char                                     read_db_field_separator;
 
   public:
     conduit_cpp::Node &databaseNode() { return this->DBNode; }
@@ -348,9 +351,8 @@ namespace Iocatalyst {
     bool readTime(Ioss::Region *region)
     {
       auto &node = this->DBNode;
-      if (node.has_child(detail::STATETIME)) {
-        const auto time = node[detail::STATETIME].as_float64();
-        region->add_state(time);
+      if (node.has_path(getTimePath())) {
+        region->add_state(node[getTimePath()].as_float64());
       }
       return true;
     }
@@ -583,6 +585,43 @@ namespace Iocatalyst {
       }
       std::replace(retVal.begin(), retVal.end(), detail::FS_CHAR, detail::DASH_CHAR);
       return retVal;
+    }
+
+    std::string getTimePath() { return detail::DATABASE + detail::FS + detail::TIME; }
+
+    int64_t getStructuredBlockIDS(const Ioss::StructuredBlock *sb, const Ioss::Field &field,
+                                  void *data, size_t data_size)
+    {
+      auto num_to_get = field.verify(data_size);
+
+      if (num_to_get > 0) {
+        switch (field.get_type()) {
+        case Ioss::Field::BasicType::INT32:
+          copyIDS(sb, field, reinterpret_cast<int32_t *>(data));
+          break;
+
+        case Ioss::Field::BasicType::INT64:
+          copyIDS(sb, field, reinterpret_cast<int64_t *>(data));
+          break;
+        default:
+          std::ostringstream errmsg;
+          fmt::print(errmsg, "ERROR in {}: {} ({}), unsupported field type: {}\n", __func__,
+                     field.get_name(), num_to_get, field.type_string());
+          IOSS_ERROR(errmsg);
+        }
+      }
+      return num_to_get;
+    }
+
+    template <typename INT_t>
+    void copyIDS(const Ioss::StructuredBlock *sb, const Ioss::Field &field, INT_t *data)
+    {
+      if (field.get_name() == detail::CELLIDS) {
+        sb->get_cell_ids(data, true);
+      }
+      else {
+        sb->get_cell_node_ids(data, true);
+      }
     }
 
     Ioss::Map &get_node_map(const Ioss::DatabaseIO *dbase) const
@@ -818,96 +857,93 @@ namespace Iocatalyst {
 
     std::vector<std::string> getScalarNamesFromNonScalarField(const Ioss::Field &field) const
     {
-      int ncomp = field.get_component_count(Ioss::Field::InOut::INPUT);
+      int                      ncomp = field.get_component_count(Ioss::Field::InOut::INPUT);
       std::vector<std::string> fnames;
-      for(int i=1; i<=ncomp; i++){
-        fnames.push_back(field.get_component_name(i, Ioss::Field::InOut::INPUT));
+      for (int i = 1; i <= ncomp; i++) {
+        if (read_db_field_separator == '\0') {
+          fnames.push_back(
+              field.get_component_name(i, Ioss::Field::InOut::INPUT, read_db_field_separator));
+        }
+        else {
+          fnames.push_back(field.get_component_name(i, Ioss::Field::InOut::INPUT));
+        }
       }
       return fnames;
     }
 
     template <typename T>
-    std::vector<T> getInterweavedScalarDataFromConduitNode(const std::vector<std::string> fnames, conduit_cpp::Node &node) const
+    std::vector<T> getInterweavedScalarDataFromConduitNode(const std::vector<std::string> fnames,
+                                                           conduit_cpp::Node &node) const
     {
-      int ncomp = fnames.size();
-      auto &&t_node = node[fnames[0] + detail::FS + detail::VALUE];
-      int num_get = t_node.number_of_elements();
-      std::vector<T> vals(ncomp*num_get);
-      
-      for(int i=0; i<num_get; i++) {
-        for(int j=0; j<ncomp; j++){
+      int            ncomp   = fnames.size();
+      auto         &&t_node  = node[fnames[0] + detail::FS + detail::VALUE];
+      int            num_get = t_node.number_of_elements();
+      std::vector<T> vals(ncomp * num_get);
+
+      for (int i = 0; i < num_get; i++) {
+        for (int j = 0; j < ncomp; j++) {
           std::string path_to_value = fnames[j] + detail::FS + detail::VALUE;
-          auto     &&child_value   = node[path_to_value];
-          vals[i*ncomp + j] = 
-            reinterpret_cast<const T *>(child_value.element_ptr(0))[i];
+          auto      &&child_value   = node[path_to_value];
+          vals[i * ncomp + j]       = reinterpret_cast<const T *>(child_value.element_ptr(0))[i];
         }
       }
       return vals;
     }
 
     template <typename T>
-    void addFieldNodeAndDataToConduitNode(const Ioss::Field &field, void *data, conduit_cpp::Node &node) const
+    void addFieldNodeAndDataToConduitNode(const Ioss::Field &field, void *data,
+                                          conduit_cpp::Node &node) const
     {
-      int ncomp = field.get_component_count(Ioss::Field::InOut::INPUT);
-      int num_get = field.raw_count();
+      int ncomp              = field.get_component_count(Ioss::Field::InOut::INPUT);
+      int num_get            = field.raw_count();
       node[field.get_name()] = conduit_cpp::Node();
-      auto &&f_node = node[field.get_name()];
+      auto &&f_node          = node[field.get_name()];
       f_node[detail::ROLE].set(static_cast<std::int8_t>(field.get_role()));
       f_node[detail::TYPE].set(static_cast<std::int8_t>(field.get_type()));
       f_node[detail::COUNT].set(static_cast<std::int64_t>(field.raw_count()));
       f_node[detail::INDEX].set(static_cast<std::int64_t>(field.get_index()));
       f_node[detail::COMPONENTCOUNT].set(static_cast<std::int64_t>(ncomp));
       f_node[detail::STORAGE].set(field.raw_storage()->name());
-      f_node[detail::VALUE].set(static_cast< T *>(data), ncomp * num_get);
+      f_node[detail::VALUE].set(static_cast<T *>(data), ncomp * num_get);
     }
 
-    void combineScalarFieldsInConduitNodeToNonScalarField(
-      const Ioss::Field &field, conduit_cpp::Node &node) const
+    void combineScalarFieldsInConduitNodeToNonScalarField(const Ioss::Field &field,
+                                                          conduit_cpp::Node &node) const
     {
-      std::vector<std::string> fnames = 
-        this->getScalarNamesFromNonScalarField(field);
+      std::vector<std::string> fnames = this->getScalarNamesFromNonScalarField(field);
 
       switch (field.get_type()) {
-        case Ioss::Field::BasicType::DOUBLE:
-          this->addFieldNodeAndDataToConduitNode<double>(
-            field, 
-            this->getInterweavedScalarDataFromConduitNode<double>(fnames, node).data(), 
-            node
-          );
-          break;
+      case Ioss::Field::BasicType::DOUBLE:
+        this->addFieldNodeAndDataToConduitNode<double>(
+            field, this->getInterweavedScalarDataFromConduitNode<double>(fnames, node).data(),
+            node);
+        break;
 
-        case Ioss::Field::BasicType::INT32:
-          this->addFieldNodeAndDataToConduitNode<std::int32_t>(
-            field, 
-            this->getInterweavedScalarDataFromConduitNode<std::int32_t>(fnames, node).data(), 
-            node
-          );
-          break;
+      case Ioss::Field::BasicType::INT32:
+        this->addFieldNodeAndDataToConduitNode<std::int32_t>(
+            field, this->getInterweavedScalarDataFromConduitNode<std::int32_t>(fnames, node).data(),
+            node);
+        break;
 
-        case Ioss::Field::BasicType::INT64:
-          this->addFieldNodeAndDataToConduitNode<std::int64_t>(
-            field, 
-            this->getInterweavedScalarDataFromConduitNode<std::int64_t>(fnames, node).data(), 
-            node
-          );
-          break;
+      case Ioss::Field::BasicType::INT64:
+        this->addFieldNodeAndDataToConduitNode<std::int64_t>(
+            field, this->getInterweavedScalarDataFromConduitNode<std::int64_t>(fnames, node).data(),
+            node);
+        break;
 
-        case Ioss::Field::BasicType::CHARACTER:
-          this->addFieldNodeAndDataToConduitNode<std::int8_t>(
-            field, 
-            this->getInterweavedScalarDataFromConduitNode<char>(fnames, node).data(), 
-            node
-          );
-          break;
-        default:
-          std::ostringstream errmsg;
-          fmt::print(errmsg, "ERROR in {} on read: {}, unsupported field type: {}\n", __func__,
-                      field.get_name(), field.type_string());
-          IOSS_ERROR(errmsg);
+      case Ioss::Field::BasicType::CHARACTER:
+        this->addFieldNodeAndDataToConduitNode<std::int8_t>(
+            field, this->getInterweavedScalarDataFromConduitNode<char>(fnames, node).data(), node);
+        break;
+      default:
+        std::ostringstream errmsg;
+        fmt::print(errmsg, "ERROR in {} on read: {}, unsupported field type: {}\n", __func__,
+                   field.get_name(), field.type_string());
+        IOSS_ERROR(errmsg);
       }
-      
-      //Remove Related Scalars from Conduit Node
-      for(int i=0; i<fnames.size(); i++) {
+
+      // Remove Related Scalars from Conduit Node
+      for (int i = 0; i < fnames.size(); i++) {
         node.remove(fnames[i]);
       }
     }
@@ -976,7 +1012,7 @@ namespace Iocatalyst {
         }
 
         for (const auto &field : fields) {
-          if(field.raw_storage()->name() != IOSS_SCALAR()) {
+          if (field.raw_storage()->name() != IOSS_SCALAR()) {
             this->combineScalarFieldsInConduitNodeToNonScalarField(field, parent);
           }
         }
@@ -992,6 +1028,7 @@ namespace Iocatalyst {
   {
     for (conduit_index_t idx = 0, max = parent.number_of_children(); idx < max; ++idx) {
       auto &&child = parent[idx];
+
       this->readProperties(child[detail::PROPERTIES], region);
 
       // read fields (meta-data only)
@@ -1193,10 +1230,10 @@ namespace Iocatalyst {
     if (write_split_type != region->get_database()->get_surface_split_type()) {
       static_cast<DatabaseIO *>(region->get_database())->set_split_type_changed(true);
     }
+    read_db_field_separator = region->get_database()->get_field_separator();
 
-    auto tpath = detail::REGION + detail::FS + detail::TIME;
-    if (node.has_path(tpath)) {
-      region->add_state(node[tpath].to_float64());
+    if (node.has_path(getTimePath())) {
+      region->add_state(node[getTimePath()].to_float64());
     }
     this->readEntityGroup<Ioss::Region>(node[detail::REGION], region);
     this->readEntityGroup<Ioss::NodeBlock>(node[detail::NODEBLOCKS], region);
@@ -1239,16 +1276,29 @@ namespace Iocatalyst {
     if (is_input()) {
       auto &pm = get_property_manager();
       if (pm.exists(detail::CATCONDNODE)) {
-        auto c_node_ptr = reinterpret_cast<conduit_node *>(
-            get_property_manager().get(detail::CATCONDNODE).get_pointer());
+        auto c_node_ptr =
+            reinterpret_cast<conduit_node *>(pm.get(detail::CATCONDNODE).get_pointer());
         this->Impl->setDatabaseNode(c_node_ptr);
       }
       else {
-        // we'll use filename as the location for the data dumps and read those.
+        int timestep = 0;
+        if (pm.exists(detail::CATREADTIMESTEP)) {
+          timestep = pm.get(detail::CATREADTIMESTEP).get_int();
+        }
+        else if (const char *ts = std::getenv(detail::CATREADTIMESTEP.c_str())) {
+          timestep = std::stoi(std::string(ts));
+        }
+
+        int proc_count = util().parallel_size();
+        int my_proc    = util().parallel_rank();
+        if (properties.exists("processor_count") && properties.exists("my_processor")) {
+          proc_count = properties.get("processor_count").get_int();
+          my_proc    = properties.get("my_processor").get_int();
+        }
+
         std::ostringstream path;
-        path << get_catalyst_dump_dir() << detail::EXECUTE_INVC << filename
-             << detail::PARAMS_CONDUIT_BIN << util().parallel_size() << detail::DOT
-             << util().parallel_rank();
+        path << get_catalyst_dump_dir() << detail::EXECUTE_INVC << timestep
+             << detail::PARAMS_CONDUIT_BIN << proc_count << detail::DOT << my_proc;
         auto &root  = this->Impl->root();
         auto &dbase = this->Impl->databaseNode();
         conduit_node_load(conduit_cpp::c_node(&root), path.str().c_str(), "conduit_bin");
@@ -1333,7 +1383,7 @@ namespace Iocatalyst {
       // invoke catalyst.
       auto &impl      = (*this->Impl.get());
       auto &dbaseNode = this->Impl->databaseNode();
-      dbaseNode[detail::REGION + detail::FS + detail::TIME].set_float64(time);
+      dbaseNode[this->Impl->getTimePath()].set_float64(time);
       conduit_cpp::Node node;
       CatalystManager::getInstance().execute(catPipeID, state, time, impl.databaseNode());
     }
@@ -1665,6 +1715,9 @@ namespace Iocatalyst {
     auto       &impl      = (*this->Impl.get());
     if (impl.hasField(blockPath, sb, field.get_name())) {
       return impl.getField(blockPath, sb, field, data, data_size);
+    }
+    else if (field.get_name() == detail::CELLIDS || field.get_name() == detail::CELLNODEIDS) {
+      return impl.getStructuredBlockIDS(sb, field, data, data_size);
     }
     else if ((field.get_name() == detail::MESHMODCO) &&
              (impl.hasField(blockPath, sb, detail::MESHMODCOX) &&
